@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os, json, subprocess, traceback, csv
+from operator import itemgetter
+
+CFG_PATH = os.path.join(os.environ.get("MK_CONFDIR", "/etc/check_mk"), "crowdsec.cfg")
+
+DEFAULTS = {
+    "MODE": "local",
+    "CSCLI_BIN": "/usr/bin/cscli",
+    "DOCKER_BIN": "/usr/bin/docker",
+    "CONTAINER": "crowdsec",
+    "TIMEOUT": "15",
+}
+
+def read_cfg_file(path):
+    cfg = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                cfg[k.strip().upper()] = v.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    return cfg
+
+def get_cfg():
+    env_cfg = {k.replace("CROWDSEC_", "", 1): v for k, v in os.environ.items() if k.startswith("CROWDSEC_")}
+    file_cfg = read_cfg_file(CFG_PATH)
+    cfg = dict(DEFAULTS); cfg.update(file_cfg); cfg.update(env_cfg)
+    return cfg
+
+def run(cmd, timeout):
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=True, encoding="utf-8")
+        return res.stdout, None
+    except subprocess.TimeoutExpired as e:
+        return "", f"timeout after {timeout}s: {e}"
+    except FileNotFoundError:
+        return "", f"binary not found: {cmd}"
+    except subprocess.CalledProcessError as e:
+        err = (e.stderr or "").strip() or (e.stdout or "").strip()
+        return "", f"rc={e.returncode}: {err}"
+
+def build_cmds(cfg):
+    mode = (cfg.get("MODE") or "local").lower()
+    timeout = int(cfg.get("TIMEOUT") or "15")
+
+    if mode == "docker":
+        docker = cfg.get("DOCKER_BIN") or "/usr/bin/docker"
+        container = cfg.get("CONTAINER") or "crowdsec"
+        def dc(*args):
+            return [docker, "exec", container, "cscli", *args]
+        metrics_cmd = dc("metrics", "-o", "json")
+        alerts_1h_cmd = dc("alerts", "list", "-o", "json", "--since", "1h", "--limit", "0")
+        alerts_24h_cmd = dc("alerts", "list", "-o", "json", "--since", "24h", "--limit", "0")
+        decisions_capi_cmd = dc("decisions", "list", "--origin", "CAPI", "-o", "raw")
+        decisions_local_cmd = dc("decisions", "list", "-o", "raw")
+    else:
+        cscli = cfg.get("CSCLI_BIN") or "/usr/bin/cscli"
+        metrics_cmd = [cscli, "metrics", "-o", "json"]
+        alerts_1h_cmd = [cscli, "alerts", "list", "-o", "json", "--since", "1h", "--limit", "0"]
+        alerts_24h_cmd = [cscli, "alerts", "list", "-o", "json", "--since", "24h", "--limit", "0"]
+        decisions_capi_cmd = [cscli, "decisions", "list", "--origin", "CAPI", "-o", "raw"]
+        decisions_local_cmd = [cscli, "decisions", "list", "-o", "raw"]
+
+    return metrics_cmd, alerts_1h_cmd, alerts_24h_cmd, decisions_capi_cmd, decisions_local_cmd, timeout
+
+def _int(v, d=0):
+    try:
+        return int(v)
+    except Exception:
+        try:
+            return int(float(v))
+        except Exception:
+            return d
+
+def safe_json_load(s):
+    try:
+        data = json.loads(s)
+        return data if isinstance(data, (dict, list)) else None
+    except Exception:
+        return None
+
+def calc_parser(metrics: dict):
+    ok = total = 0
+    parsers = metrics.get("parsers") or {}
+    if isinstance(parsers, dict):
+        for stats in parsers.values():
+            if not isinstance(stats, dict):
+                continue
+            p_ok = _int(stats.get("parsed", 0))
+            hits = stats.get("hits")
+            unp = _int(stats.get("unparsed", 0))
+            p_total = hits if isinstance(hits, int) else p_ok + unp
+            if p_total < 0:
+                p_total = 0
+            ok += p_ok
+            total += p_total
+    rate = (ok * 100.0) / total if total > 0 else 0.0
+    return ok, total, rate
+
+def calc_alerts_total(metrics: dict):
+    total = 0
+    alerts = metrics.get("alerts") or {}
+    if isinstance(alerts, dict):
+        for v in alerts.values():
+            total += _int(v, 0)
+    return total
+
+def calc_bouncers(metrics: dict):
+    b = metrics.get("bouncers") or {}
+    processed = dropped = 0
+    if isinstance(b, dict):
+        for sections in b.values():
+            if not isinstance(sections, dict):
+                continue
+            emp = sections.get("")
+            if isinstance(emp, dict):
+                pr = emp.get("processed")
+                if isinstance(pr, dict):
+                    processed += _int(pr.get("request", 0))
+            for key in ("CAPI", "crowdsec"):
+                sec = sections.get(key)
+                if isinstance(sec, dict):
+                    dr = sec.get("dropped")
+                    if isinstance(dr, dict):
+                        dropped += _int(dr.get("request", 0))
+    rate = (dropped * 100.0 / processed) if processed > 0 else 0.0
+    return processed, dropped, rate
+
+def parse_decisions_csv(raw_text: str):
+    if not raw_text:
+        return 0, {}
+    lines = raw_text.splitlines()
+    if not lines:
+        return 0, {}
+    try:
+        header = next(csv.reader([lines]))
+    except Exception:
+        header = ["id","source","ip","reason","action","country","as","events_count","expiration","simulated","alert_id"]
+    idx_reason = header.index("reason") if "reason" in header else 3
+    total = 0
+    counts = {}
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        try:
+            row = next(csv.reader([line]))
+        except Exception:
+            continue
+        total += 1
+        reason = row[idx_reason] if len(row) > idx_reason else "unknown"
+        counts[reason] = counts.get(reason, 0) + 1
+    return total, counts
+
+def topN_from_counts(counts: dict, n=20):
+    pairs = [(k, _int(v, 0)) for k, v in counts.items()]
+    pairs.sort(key=itemgetter(1), reverse=True)
+    return [[k, v] for k, v in pairs[:n]]
+
+def main():
+    cfg = get_cfg()
+    metrics_cmd, alerts_1h_cmd, alerts_24h_cmd, decisions_capi_cmd, decisions_local_cmd, timeout = build_cmds(cfg)
+
+    errors = {}
+    metrics = {}
+    out_metrics, err = run(metrics_cmd, timeout)
+    if err or not (out_metrics or "").strip():
+        errors["metrics"] = err or "empty output"
+    else:
+        m = safe_json_load(out_metrics)
+        if isinstance(m, dict):
+            metrics = m
+        else:
+            errors["metrics"] = "unexpected json type"
+
+    parser_ok = parser_total = 0
+    success_rate = 0.0
+    alerts_total = 0
+    processed_requests = dropped_requests = 0
+    droprate_pct = 0.0
+    decisions_local = decisions_capi = 0
+    top_local = []
+    top_capi = []
+    alerts_last_1h = alerts_last_24h = 0
+
+    if metrics:
+        parser_ok, parser_total, success_rate = calc_parser(metrics)
+        alerts_total = calc_alerts_total(metrics)
+        processed_requests, dropped_requests, droprate_pct = calc_bouncers(metrics)
+
+    out, err = run(alerts_1h_cmd, timeout)
+    if not err and (out or "").strip():
+        lst = safe_json_load(out)
+        if isinstance(lst, list):
+            alerts_last_1h = len(lst)
+        else:
+            errors["alerts_1h"] = "unexpected json type"
+    elif err:
+        errors["alerts_1h"] = err
+
+    out, err = run(alerts_24h_cmd, timeout)
+    if not err and (out or "").strip():
+        lst = safe_json_load(out)
+        if isinstance(lst, list):
+            alerts_last_24h = len(lst)
+        else:
+            errors["alerts_24h"] = "unexpected json type"
+    elif err:
+        errors["alerts_24h"] = err
+
+    # CAPI decisions (nur --origin CAPI)
+    out_capi, err_capi = run(decisions_capi_cmd, timeout)
+    if not err_capi and (out_capi or "").strip():
+        capi_total, capi_counts = parse_decisions_csv(out_capi)
+        decisions_capi = capi_total
+        top_capi = topN_from_counts(capi_counts)
+    else:
+        errors["decisions_capi"] = err_capi or "empty output"
+
+    # Lokale decisions (nur -o raw)
+    out_local, err_local = run(decisions_local_cmd, timeout)
+    if not err_local and (out_local or "").strip():
+        local_total, local_counts = parse_decisions_csv(out_local)
+        decisions_local = local_total
+        top_local = topN_from_counts(local_counts)
+    else:
+        errors["decisions_local"] = err_local or "empty output"
+
+    result = {
+        "parser_ok": parser_ok,
+        "parser_total": parser_total,
+        "success_rate": round(success_rate, 6),
+        "alerts_last_24h": alerts_last_24h,
+        "alerts_last_1h": alerts_last_1h,
+        "alerts_total": alerts_total,
+        "processed_requests": processed_requests,
+        "dropped_requests": dropped_requests,
+        "droprate_pct": round(droprate_pct, 6),
+        "decisions_local": decisions_local,
+        "decisions_capi": decisions_capi,
+        "top_local": top_local,
+        "top_capi": top_capi,
+    }
+    if errors:
+        result["errors"] = errors
+
+    print("<<<crowdsec>>>")
+    print(json.dumps(result, separators=(",", ":")))
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print("<<<crowdsec>>>")
+        print(json.dumps({"errors": {"plugin": str(e), "traceback": traceback.format_exc()}}))
