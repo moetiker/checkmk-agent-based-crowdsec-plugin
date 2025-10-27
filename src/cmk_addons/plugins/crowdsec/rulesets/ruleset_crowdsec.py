@@ -79,7 +79,7 @@ def _parameter_form():
 
 rule_spec_crowdsec_parameters = CheckParameters(
     name="crowdsec_parameters",
-    title=Title("CrowdSec – Schwellwerte"),
+    title=Title("CrowdSec level"),
     topic=Topic.APPLICATIONS,
     condition=HostCondition(),
     parameter_form=_parameter_form,
