@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, json, subprocess, traceback, csv
+import os, sys, json, subprocess, traceback, csv
 from operator import itemgetter
 
 CFG_PATH = os.path.join(os.environ.get("MK_CONFDIR", "/etc/check_mk"), "crowdsec.cfg")
@@ -36,7 +36,8 @@ def get_cfg():
 
 def run(cmd, timeout):
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=True, encoding="utf-8")
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=True, encoding="utf-8",
+        )
         return res.stdout, None
     except subprocess.TimeoutExpired as e:
         return "", f"timeout after {timeout}s: {e}"
@@ -46,29 +47,8 @@ def run(cmd, timeout):
         err = (e.stderr or "").strip() or (e.stdout or "").strip()
         return "", f"rc={e.returncode}: {err}"
 
-def build_cmds(cfg):
-    mode = (cfg.get("MODE") or "local").lower()
-    timeout = int(cfg.get("TIMEOUT") or "15")
-
-    if mode == "docker":
-        docker = cfg.get("DOCKER_BIN") or "/usr/bin/docker"
-        container = cfg.get("CONTAINER") or "crowdsec"
-        def dc(*args):
-            return [docker, "exec", container, "cscli", *args]
-        metrics_cmd = dc("metrics", "-o", "json")
-        alerts_1h_cmd = dc("alerts", "list", "-o", "json", "--since", "1h", "--limit", "0")
-        alerts_24h_cmd = dc("alerts", "list", "-o", "json", "--since", "24h", "--limit", "0")
-        decisions_capi_cmd = dc("decisions", "list", "--origin", "CAPI", "-o", "raw")
-        decisions_local_cmd = dc("decisions", "list", "-o", "raw")
-    else:
-        cscli = cfg.get("CSCLI_BIN") or "/usr/bin/cscli"
-        metrics_cmd = [cscli, "metrics", "-o", "json"]
-        alerts_1h_cmd = [cscli, "alerts", "list", "-o", "json", "--since", "1h", "--limit", "0"]
-        alerts_24h_cmd = [cscli, "alerts", "list", "-o", "json", "--since", "24h", "--limit", "0"]
-        decisions_capi_cmd = [cscli, "decisions", "list", "--origin", "CAPI", "-o", "raw"]
-        decisions_local_cmd = [cscli, "decisions", "list", "-o", "raw"]
-
-    return metrics_cmd, alerts_1h_cmd, alerts_24h_cmd, decisions_capi_cmd, decisions_local_cmd, timeout
+def is_executable(path: str) -> bool:
+    return bool(path) and os.path.exists(path) and os.access(path, os.X_OK)
 
 def _int(v, d=0):
     try:
@@ -85,6 +65,65 @@ def safe_json_load(s):
         return data if isinstance(data, (dict, list)) else None
     except Exception:
         return None
+
+def build_cmds_for_local(cfg):
+    cscli = cfg.get("CSCLI_BIN") or "/usr/bin/cscli"
+    metrics_cmd = [cscli, "metrics", "-o", "json"]
+    alerts_1h_cmd = [cscli, "alerts", "list", "-o", "json", "--since", "1h", "--limit", "0"]
+    alerts_24h_cmd = [cscli, "alerts", "list", "-o", "json", "--since", "24h", "--limit", "0"]
+    decisions_capi_cmd = [cscli, "decisions", "list", "--origin", "CAPI", "-o", "raw"]
+    decisions_local_cmd = [cscli, "decisions", "list", "-o", "raw"]
+    return metrics_cmd, alerts_1h_cmd, alerts_24h_cmd, decisions_capi_cmd, decisions_local_cmd
+
+def build_cmds_for_docker(cfg):
+    docker = cfg.get("DOCKER_BIN") or "/usr/bin/docker"
+    container = cfg.get("CONTAINER") or "crowdsec"
+
+    def dc(*args):
+        return [docker, "exec", container, "cscli", *args]
+
+    metrics_cmd = dc("metrics", "-o", "json")
+    alerts_1h_cmd = dc("alerts", "list", "-o", "json", "--since", "1h", "--limit", "0")
+    alerts_24h_cmd = dc("alerts", "list", "-o", "json", "--since", "24h", "--limit", "0")
+    decisions_capi_cmd = dc("decisions", "list", "--origin", "CAPI", "-o", "raw")
+    decisions_local_cmd = dc("decisions", "list", "-o", "raw")
+    return metrics_cmd, alerts_1h_cmd, alerts_24h_cmd, decisions_capi_cmd, decisions_local_cmd
+
+def probe_local(cfg, timeout: int) -> bool:
+    cscli = cfg.get("CSCLI_BIN") or "/usr/bin/cscli"
+    if not is_executable(cscli):
+        return False
+    out, err = run([cscli, "version"], timeout)
+    return err is None and (out or "").strip() != ""
+
+def probe_docker(cfg, timeout: int) -> bool:
+    docker = cfg.get("DOCKER_BIN") or "/usr/bin/docker"
+    if not is_executable(docker):
+        return False
+    container = cfg.get("CONTAINER") or "crowdsec"
+    out, err = run([docker, "exec", container, "cscli", "version"], timeout)
+    return err is None and (out or "").strip() != ""
+
+def select_mode_and_cmds(cfg, timeout: int):
+    mode = (cfg.get("MODE") or "local").lower()
+
+    if mode == "local":
+        if not probe_local(cfg, timeout):
+            return None, None
+        return "local", build_cmds_for_local(cfg)
+
+    if mode == "docker":
+        if not probe_docker(cfg, timeout):
+            return None, None
+        return "docker", build_cmds_for_docker(cfg)
+
+    # auto: try local first, then docker
+    if probe_local(cfg, timeout):
+        return "local", build_cmds_for_local(cfg)
+    if probe_docker(cfg, timeout):
+        return "docker", build_cmds_for_docker(cfg)
+
+    return None, None
 
 def calc_parser(metrics: dict):
     ok = total = 0
@@ -140,7 +179,7 @@ def parse_decisions_csv(raw_text: str):
     if not lines:
         return 0, {}
     try:
-        header = next(csv.reader([lines]))
+        header = next(csv.reader([lines[0]]))
     except Exception:
         header = ["id","source","ip","reason","action","country","as","events_count","expiration","simulated","alert_id"]
     idx_reason = header.index("reason") if "reason" in header else 3
@@ -165,10 +204,18 @@ def topN_from_counts(counts: dict, n=20):
 
 def main():
     cfg = get_cfg()
-    metrics_cmd, alerts_1h_cmd, alerts_24h_cmd, decisions_capi_cmd, decisions_local_cmd, timeout = build_cmds(cfg)
+    timeout = int(cfg.get("TIMEOUT") or "15")
+
+    selected_mode, cmds = select_mode_and_cmds(cfg, timeout)
+    if not selected_mode or not cmds:
+        # CrowdSec not installed/reachable => emit nothing => no section => no discovery
+        sys.exit(0)
+
+    metrics_cmd, alerts_1h_cmd, alerts_24h_cmd, decisions_capi_cmd, decisions_local_cmd = cmds
 
     errors = {}
     metrics = {}
+
     out_metrics, err = run(metrics_cmd, timeout)
     if err or not (out_metrics or "").strip():
         errors["metrics"] = err or "empty output"
@@ -214,7 +261,6 @@ def main():
     elif err:
         errors["alerts_24h"] = err
 
-    # CAPI decisions (nur --origin CAPI)
     out_capi, err_capi = run(decisions_capi_cmd, timeout)
     if not err_capi and (out_capi or "").strip():
         capi_total, capi_counts = parse_decisions_csv(out_capi)
@@ -223,7 +269,6 @@ def main():
     else:
         errors["decisions_capi"] = err_capi or "empty output"
 
-    # Lokale decisions (nur -o raw)
     out_local, err_local = run(decisions_local_cmd, timeout)
     if not err_local and (out_local or "").strip():
         local_total, local_counts = parse_decisions_csv(out_local)
@@ -256,6 +301,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception as e:
-        print("<<<crowdsec>>>")
-        print(json.dumps({"errors": {"plugin": str(e), "traceback": traceback.format_exc()}}))
+    except Exception:
+        # Important: do NOT emit a section on crash, otherwise you'll create a fake service.
+        sys.exit(0)
