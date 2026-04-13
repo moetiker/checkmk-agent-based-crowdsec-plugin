@@ -61,8 +61,8 @@ def check_crowdsec(item: str, params: dict, section: Section):
             yield Result(state=State.OK, summary="Parser success rate: 0.00% (Parsed 0 / Total 0)")
             yield Metric("success_rate", 0.0)
             return
-        warn = float(params.get("parser_warn", 98.0))
-        crit = float(params.get("parser_crit", 95.0))
+        warn = float(params.get("parser_warn", 80.0))
+        crit = float(params.get("parser_crit", 60.0))
         summary = f"Parser success rate: {rate:.2f}% (Parsed {ok} / Total {total})"
         for entry in check_levels(
             value=rate,
@@ -76,7 +76,7 @@ def check_crowdsec(item: str, params: dict, section: Section):
                 yield Result(state=entry.state, summary=summary)
             else:
                 yield entry
-        
+
         #yield Metric("parser_ok", ok)
         #yield Metric("parser_total", total)
         return
@@ -85,10 +85,10 @@ def check_crowdsec(item: str, params: dict, section: Section):
         v24 = _int(section.get("alerts_last_24h"), 0)
         v1h = _int(section.get("alerts_last_1h"), 0)
         vtot = _int(section.get("alerts_total"), 0)
-        warn_24h = int(params.get("alerts_24h_warn", 100))
-        crit_24h = int(params.get("alerts_24h_crit", 500))
-        warn_1h = int(params.get("alerts_1h_warn", 20))
-        crit_1h = int(params.get("alerts_1h_crit", 50))
+        warn_24h = int(params.get("alerts_24h_warn", 2000))
+        crit_24h = int(params.get("alerts_24h_crit", 5000))
+        warn_1h = int(params.get("alerts_1h_warn", 200))
+        crit_1h = int(params.get("alerts_1h_crit", 500))
         state_24h = State.CRIT if v24 >= crit_24h else State.WARN if v24 >= warn_24h else State.OK
         state_1h = State.CRIT if v1h >= crit_1h else State.WARN if v1h >= warn_1h else State.OK
         overall_state = State.CRIT if State.CRIT in (state_24h, state_1h) else State.WARN if State.WARN in (state_24h, state_1h) else State.OK
@@ -151,14 +151,14 @@ check_plugin_crowdsec = CheckPlugin(
     check_ruleset_name="crowdsec_parameters",
     sections=["crowdsec"],
     check_default_parameters={
-        "parser_warn": 98.0,
-        "parser_crit": 95.0,
+        "parser_warn": 80.0,
+        "parser_crit": 60.0,
         "droprate_warn": 1.0,
         "droprate_crit": 5.0,
-        "alerts_1h_warn": 20,
-        "alerts_1h_crit": 50,
-        "alerts_24h_warn": 100,
-        "alerts_24h_crit": 500,
+        "alerts_1h_warn": 200,
+        "alerts_1h_crit": 500,
+        "alerts_24h_warn": 2000,
+        "alerts_24h_crit": 5000,
         "top_reasons": 5,
     },
 )

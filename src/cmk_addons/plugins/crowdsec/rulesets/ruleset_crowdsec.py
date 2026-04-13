@@ -14,14 +14,14 @@ def _parameter_form():
             "parser_warn": DictElement(
                 parameter_form=Float(
                     title=Title("Parser success WARN below (%)"),
-                    prefill=DefaultValue(98.0),
+                    prefill=DefaultValue(80.0),
                 ),
                 required=True,
             ),
             "parser_crit": DictElement(
                 parameter_form=Float(
                     title=Title("Parser success CRIT below (%)"),
-                    prefill=DefaultValue(95.0),
+                    prefill=DefaultValue(60.0),
                 ),
                 required=True,
             ),
@@ -42,28 +42,28 @@ def _parameter_form():
             "alerts_1h_warn": DictElement(
                 parameter_form=Integer(
                     title=Title("Alerts last 1h WARN at/above"),
-                    prefill=DefaultValue(20),
+                    prefill=DefaultValue(200),
                 ),
                 required=True,
             ),
             "alerts_1h_crit": DictElement(
                 parameter_form=Integer(
                     title=Title("Alerts last 1h CRIT at/above"),
-                    prefill=DefaultValue(50),
+                    prefill=DefaultValue(500),
                 ),
                 required=True,
             ),
             "alerts_24h_warn": DictElement(
                 parameter_form=Integer(
                     title=Title("Alerts last 24h WARN at/above"),
-                    prefill=DefaultValue(100),
+                    prefill=DefaultValue(2000),
                 ),
                 required=True,
             ),
             "alerts_24h_crit": DictElement(
                 parameter_form=Integer(
                     title=Title("Alerts last 24h CRIT at/above"),
-                    prefill=DefaultValue(500),
+                    prefill=DefaultValue(5000),
                 ),
                 required=True,
             ),
