@@ -4,35 +4,40 @@ This plugin provides comprehensive monitoring of CrowdSec intrusion detection an
 
 This plugin is designed for Checkmk 2.3 and above.
 
-> **A Note from the Author**
->
-> I am not a professional software developer, but an IT admin with a background in scripting. This project came to life through a combination of practical experience, assistance from AI / KI, and a good amount of trial and error to solve a real-world problem.
->
-> Since this is a practical solution, improvements and suggestions are highly encouraged! Please feel free to submit a Pull Request with any enhancements. If you have any questions about the approach or need help, you're welcome to open an Issue.
+Based on the work of [nicoh88/checkmk-agent-based-crowdsec-plugin](https://github.com/nicoh88/checkmk-agent-based-crowdsec-plugin), extended with Agent Bakery support by [OETIKER+PARTNER AG](https://www.oetiker.ch).
 
 ## Features
 
 This package includes five distinct checks:
 
-- **CrowdSec Parser Health**: Monitors the parser success rate in percentage (configurable thresholds: WARN <98%, CRIT <95%).
+- **CrowdSec Parser Health**: Monitors the parser success rate in percentage (configurable thresholds: WARN <80%, CRIT <60%).
 - **CrowdSec Alerts**: Monitors alert counts for the last 1 hour and 24 hours, with configurable thresholds for both timeframes.
-- **CrowdSec Bouncer Dropped**: Monitors the drop rate percentage of processed requests by bouncers (configurable thresholds: WARN ≥1%, CRIT ≥5%).
+- **CrowdSec Bouncer Dropped**: Monitors the drop rate percentage of processed requests by bouncers (configurable thresholds: WARN >=1%, CRIT >=5%).
 - **CrowdSec Decisions Local**: Tracks local decisions and displays the top N scenarios (default: top 5).
 - **CrowdSec Decisions CAPI**: Tracks CAPI (Community API) decisions and displays the top N scenarios (default: top 5).
 
-![CrowdSec Services in Checkmk](https://github.com/nicoh88/checkmk-agent-based-crowdsec-plugin/blob/main/screenshot.png?raw=true)
+## 1. Installation (Checkmk Server)
 
-## 1. Agent Setup
+The recommended installation method is using the MKP (Checkmk Extension Package).
 
-This plugin requires an agent-side script to be deployed on the monitored hosts. The script queries CrowdSec metrics using the `cscli` command-line tool.
+### A. MKP Installation (Recommended)
 
-### Prerequisites
+1. Download the latest `.mkp` file from the Releases page.
+2. In your Checkmk site, navigate to **Setup > Maintenance > Extension packages**.
+3. Upload the downloaded `.mkp` file and activate the changes.
 
-- CrowdSec must be installed and running on the target host
-- The `cscli` binary must be accessible (default: `/usr/bin/cscli`)
-- For Docker installations: Docker must be installed and the CrowdSec container must be running
+### B. Agent Bakery (Enterprise Edition)
 
-### Installation Steps
+If you are using the Checkmk Enterprise Edition, the agent plugin can be deployed automatically via the Agent Bakery:
+
+1. Navigate to **Setup > Agents > Windows, Linux, Solaris, AIX > Agent rules**.
+2. Search for **"CrowdSec (Linux)"** and create a new rule.
+3. Configure the async execution interval (default: 300 seconds).
+4. Bake and deploy the agent to the target hosts.
+
+### C. Manual Agent Installation
+
+If you are not using the Agent Bakery, deploy the agent plugin manually:
 
 1. Copy the file `agent/crowdsec` from this repository to `/usr/lib/check_mk_agent/plugins/` on your target Linux machines.
 
@@ -42,7 +47,7 @@ This plugin requires an agent-side script to be deployed on the monitored hosts.
    chmod +x /usr/lib/check_mk_agent/plugins/crowdsec
    ```
 
-### Configuration (Optional)
+### Agent Configuration (Optional)
 
 The agent plugin can be configured via configuration file or environment variables. Configuration precedence (highest to lowest):
 
@@ -90,53 +95,13 @@ export CROWDSEC_CONTAINER=crowdsec
 export CROWDSEC_TIMEOUT=20
 ```
 
-## 2. Installation (Checkmk Server)
-
-The recommended installation method is using the MKP (Checkmk Extension Package).
-
-### A. MKP Installation (Recommended)
-
-1. Download the latest `.mkp` file from the Releases page.
-2. In your Checkmk site, navigate to **Setup > Maintenance > Extension packages**.
-3. Upload the downloaded `.mkp` file and activate the changes.
-
-### B. Manual Installation
-
-For development or testing, you can copy the plugin files manually into your Checkmk site. **Replace `mysite` with your site's name.**
-
-1. Clone this repository to a temporary location on your Checkmk server.
-
-2. Create the necessary directories within your site's `local` path:
-
-   ```bash
-   SITE_PATH=~/sites/mysite
-   mkdir -p $SITE_PATH/local/lib/python3/cmk_addons/plugins/crowdsec/agent_based
-   mkdir -p $SITE_PATH/local/lib/python3/cmk_addons/plugins/crowdsec/graphing
-   mkdir -p $SITE_PATH/local/lib/python3/cmk_addons/plugins/crowdsec/rulesets
-   ```
-
-3. Copy the plugin files from the cloned repository into the newly created directories:
-
-   ```bash
-   # Copy agent-based checks
-   cp src/cmk_addons/plugins/crowdsec/agent_based/*.py $SITE_PATH/local/lib/python3/cmk_addons/plugins/crowdsec/agent_based/
-
-   # Copy graphing definitions
-   cp src/cmk_addons/plugins/crowdsec/graphing/*.py $SITE_PATH/local/lib/python3/cmk_addons/plugins/crowdsec/graphing/
-
-   # Copy ruleset definitions
-   cp src/cmk_addons/plugins/crowdsec/rulesets/*.py $SITE_PATH/local/lib/python3/cmk_addons/plugins/crowdsec/rulesets/
-   ```
-
-4. Restart the site to apply the changes: `omd restart mysite`.
-
-## 3. Configuration
+## 2. Configuration
 
 1. After deploying the agent plugin and installing the MKP, go to the properties of a configured host in Checkmk.
 
 2. Run a service discovery (**Setup > Services > Service discovery**). Checkmk should now discover the new "CrowdSec" services.
 
-3. To adjust thresholds, search for **"CrowdSec – Schwellwerte"** (or **"CrowdSec thresholds"**) in the setup menu and create a new rule.
+3. To adjust thresholds, search for **"CrowdSec level"** in the setup menu and create a new rule.
 
 ### Available Threshold Parameters
 
@@ -144,15 +109,13 @@ The following thresholds can be configured:
 
 | Parameter | Description | Default WARN | Default CRIT |
 |-----------|-------------|--------------|--------------|
-| Parser success rate | Percentage of successfully parsed logs | <98% | <95% |
-| Drop rate | Percentage of dropped requests by bouncers | ≥1% | ≥5% |
-| Alerts (1h) | Number of alerts in the last hour | ≥20 | ≥50 |
-| Alerts (24h) | Number of alerts in the last 24 hours | ≥100 | ≥500 |
+| Parser success rate | Percentage of successfully parsed logs | <80% | <60% |
+| Drop rate | Percentage of dropped requests by bouncers | >=1% | >=5% |
+| Alerts (1h) | Number of alerts in the last hour | >=200 | >=500 |
+| Alerts (24h) | Number of alerts in the last 24 hours | >=2000 | >=5000 |
 | Top reasons | Number of top scenarios displayed in decisions summary | 5 | - |
 
-## 4. Monitored Metrics
-
-The plugin collects and monitors the following metrics:
+## 3. Monitored Metrics
 
 ### Parser Health
 - **success_rate**: Parser success rate in percentage
@@ -174,6 +137,23 @@ The plugin collects and monitors the following metrics:
 - **decisions_capi**: Number of active CAPI decisions
 - **top_local**: List of top N local decision scenarios with counts
 - **top_capi**: List of top N CAPI decision scenarios with counts
+
+## 4. Building the MKP
+
+Prerequisites:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install mkp
+```
+
+Build:
+
+```bash
+.venv/bin/python build_mkp.py
+```
+
+The MKP file will be created in `build/dist/`.
 
 ## 5. Troubleshooting
 
@@ -201,10 +181,20 @@ cmkagent ALL=(ALL) NOPASSWD: /usr/bin/cscli decisions list *
 - Test Docker exec manually: `docker exec crowdsec cscli metrics -o json`
 - Ensure the Checkmk agent user has Docker permissions
 
+### Slow or Hanging Commands
+
+If `cscli alerts list` or `cscli decisions list` are slow or hang, this is typically caused by:
+
+- A large number of CAPI decisions in the local database
+- An unreachable remote LAPI server (check `/etc/crowdsec/local_api_credentials.yaml`)
+- SQLite performance issues (consider enabling WAL mode with `use_wal: true` in `/etc/crowdsec/config.yaml`)
+
+The plugin handles timeouts gracefully and will report partial data with error details.
+
 ## 6. Performance Considerations
 
 The plugin executes multiple `cscli` commands per check cycle. To minimize performance impact:
 
-- The default timeout is set to 15 seconds
-- Consider increasing the check interval for high-traffic systems
-- Use Docker mode if possible, as it may be more efficient than local execution
+- The default timeout is set to 15 seconds per command
+- Consider increasing the check interval for high-traffic systems via the Agent Bakery rule
+- With many CAPI decisions, the total runtime can be up to 5 x timeout (75 seconds default)
